@@ -2,10 +2,9 @@
 #include<stdlib.h>
 #include "/home/zorin/openMPI/include/mpi.h"
 
-#define N 5
 #define M 3
 
-int async_preprocess_send(int* preprocess, int* data_point, int next_data_point, int size, int dest_rank, int tag, MPI_Request *req) {
+int async_preprocess_send(double* preprocess, double* data_point, int next_data_point, int size, int dest_rank, int tag, MPI_Request *req) {
     for(int i=0; i<size; i++) {
         for(int j=0; j<size; j++) {
             *(preprocess + j + i*size) = *(data_point + j); 
@@ -13,49 +12,45 @@ int async_preprocess_send(int* preprocess, int* data_point, int next_data_point,
         data_point+=next_data_point;
     }
 
-    MPI_Isend(preprocess, size*size, MPI_INT, dest_rank, tag, MPI_COMM_WORLD, req);
+    MPI_Isend(preprocess, size*size, MPI_DOUBLE, dest_rank, tag, MPI_COMM_WORLD, req);
     return 0;
 }
 
-int async_recv(int* buff, int size, int src_rank, int src_tag, MPI_Request *req) {
-    MPI_Irecv(buff, size*size, MPI_INT, src_rank, src_tag, MPI_COMM_WORLD, req);
+int async_recv(double *buff, int size, int src_rank, int src_tag, MPI_Request *req) {
+    MPI_Irecv(buff, size*size, MPI_DOUBLE, src_rank, src_tag, MPI_COMM_WORLD, req);
     return 0;
 }
 
-int convulate(int *data, int *kernel, int size) {
-    int val = 0;
+double convulate(double *data, int col_offset, double *kernel, int size) {
+    double val = 0;
     for(int i=0; i<size; i++) {
-        val += (*(data + i)) * (*(kernel + i));
+        for(int j=0; j<size; j++) {
+            val += (*(data + j + i*col_offset)) * (*(kernel + j + i*size));
+        }
     }
+    val /= size*size;
     return val;
 }
 
-int print(int *data, int size) {
+int print(double *data, int size) {
     for(int i=0; i<size; i++) {
         for(int j=0; j<size; j++) {
-            printf("%d  ",*(data + j + i*size));
+            printf("%f\n",*(data + j + i*size));
         }
-        printf("\n");
     }
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int parallel_convulation(double* a, int N) {
 
-    int a[N][N] = {
-        {199,208,233,4,5},
-        {200,140,10,212,13},
-        {150,65,100,101,101},
-        {140,50,255,90,10},
-        {224,69,89,210,211}
-    };
-
-    int kernel[3][3];
+    double kernel[3][3];
     
-    int rank, size, i, j, ele_per_procs, ele_remaining, kernel_size, r, req_no, input_offset_start, input_offset_end;
-    int *input_data, *output_data;
+    int rank, size, i, j, ele_per_procs, ele_remaining, kernel_size, r, req_no;
+    int input_offset_start, input_offset_end, new_input_size, processed_input_size;
+    double *input_data, *output_data;
+    double start_time, end_time;
 
-    MPI_Init(&argc, &argv);
+    MPI_Init(0,'\0');
     MPI_Comm_rank(MPI_COMM_WORLD, &rank); //get rank of node's process
     MPI_Comm_size(MPI_COMM_WORLD, &size); //comm size
     
@@ -74,9 +69,24 @@ int main(int argc, char *argv[]) {
         kernel[2][1] = -1;
         kernel[2][2] = 0;
 
-        int new_input_size = N+2*(M/2);
-        int processed_input_size = new_input_size - (M-1);
-        int processed_a[new_input_size][new_input_size];
+        start_time = MPI_Wtime();
+
+        new_input_size = N+2*(M/2);
+        processed_input_size = new_input_size - (M-1);
+
+        kernel_size = M;
+        ele_per_procs = (processed_input_size*processed_input_size) / (size - 1);
+        ele_remaining = (processed_input_size*processed_input_size) % (size -1);
+    }
+
+    MPI_Bcast(&kernel_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&kernel[0][0], kernel_size*kernel_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&ele_per_procs, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    if (rank == 0) {    
+        
+        double processed_a[new_input_size][new_input_size];
         input_data = &processed_a[0][0];
 
         for (i=0; i<new_input_size; i++) {
@@ -85,27 +95,12 @@ int main(int argc, char *argv[]) {
                     processed_a[i][j] = 256;       
                 } 
                 else {
-                    processed_a[i][j] = a[i-1][j-1];
+                    processed_a[i][j] = *(a + j + i*N);
                 }
             }
-        }        
-
-        print(&processed_a[0][0], new_input_size);
-
-        kernel_size = M;
-
-        MPI_Bcast(&kernel_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&kernel[0][0], kernel_size*kernel_size, MPI_INT, 0, MPI_COMM_WORLD);
-
-        ele_per_procs = (processed_input_size*processed_input_size) / (size - 1);
-        ele_remaining = (processed_input_size*processed_input_size) % (size -1);
-
-        MPI_Bcast(&ele_per_procs, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-        printf("input P: %d\n done bcasts\n size: %d\n", processed_input_size, size);
-        printf("procs size: %d\n ele remain %d\n", ele_per_procs, ele_remaining);
-
-        int *preprocess = (int *)malloc(sizeof(int)*kernel_size*kernel_size);
+        }
+        
+        double *preprocess = (double *)malloc(sizeof(double)*kernel_size*kernel_size);
         req = (MPI_Request *)malloc(sizeof(MPI_Request)*ele_per_procs*(size -1));
         
         r = 0;
@@ -117,29 +112,23 @@ int main(int argc, char *argv[]) {
                 async_preprocess_send(preprocess, &processed_a[i][j], new_input_size, kernel_size, r, 0, req+req_no);                         
                 req_no++;
                 input_offset_start++;
-                printf("%d-%d,  sent rq: %d\n", i,j,req_no);
             }
         }
 
-        printf("sent all req\n");
         input_offset_end = ele_remaining;    
+        free(preprocess);
+        output_data = (double *)malloc(sizeof(double)*N*N);
     }
 
     else {
-        MPI_Recv(&kernel_size, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(&kernel[0][0], kernel_size*kernel_size, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        MPI_Recv(&ele_per_procs, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-        MPI_Barrier(MPI_COMM_WORLD);
-
         req = (MPI_Request *)malloc(sizeof(MPI_Request)*ele_per_procs);
-        input_data = (int *)malloc(sizeof(int)*ele_per_procs*kernel_size*kernel_size);
-        output_data = (int *)malloc(sizeof(int)*ele_per_procs);
+        input_data = (double *)(malloc(sizeof(double)*ele_per_procs*kernel_size*kernel_size));
+        output_data = (double *)malloc(sizeof(double)*ele_per_procs);
         input_offset_start = 0;
         input_offset_end = 0;
         req_no = 0;
         for(i=0; i<ele_per_procs; i++) {
-            async_recv(input_data+i, kernel_size, 0, 0, req+req_no);
+            async_recv(input_data+(i*kernel_size*kernel_size), kernel_size, 0, 0, req+req_no);
             req_no++;
             input_offset_end++;
         }
@@ -148,12 +137,17 @@ int main(int argc, char *argv[]) {
     MPI_Waitall(req_no, req, MPI_STATUS_IGNORE);
 
     for(i=input_offset_start; i<input_offset_end; i++) {
-        *(output_data + i) = convulate(input_data + i, &kernel[0][0], kernel_size);
+        if (rank == 0) {
+            *(output_data + i + kernel_size/2 + N*kernel_size/2) = convulate(input_data + i, new_input_size, &kernel[0][0], kernel_size);
+        }
+        else {
+            *(output_data + i) = convulate(input_data + i*kernel_size, 1, &kernel[0][0], kernel_size);           
+        }
     }
 
     if (rank != 0) {
+        MPI_Isend(output_data, ele_per_procs, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, req+req_no);
         req_no = 1;
-        MPI_Isend(output_data, ele_per_procs, MPI_INT, 0, 0, MPI_COMM_WORLD, req+req_no);
     } 
     else {
         req_no = 0;
@@ -164,12 +158,39 @@ int main(int argc, char *argv[]) {
     }
 
     MPI_Waitall(req_no, req, MPI_STATUS_IGNORE);
-
+    
     if (rank == 0) {
-        printf("heeeheheh");
+        end_time = MPI_Wtime();
+
         print(output_data, N);
-    }
+        printf("%f\n",end_time-start_time);
+    } 
 
     MPI_Finalize();
+    return 0;
+}
+
+int main() {
+    int n;
+    scanf("%d", &n);
+    
+    double a[n][n];
+    
+    for(int i=0; i<n; i++) {
+        for(int j=0; j<n; j++) {
+            a[i][j] = (rand()*RAND_MAX)%256;
+        }
+    }
+
+    // double a[5][5] = {
+    //     {199,208,233,4,5},
+    //     {200,140,10,212,13},
+    //     {150,65,100,101,101},
+    //     {140,50,255,90,10},
+    //     {224,69,89,210,211}
+    // };    
+
+    parallel_convulation(&a[0][0], n);
+    
     return 0;
 }
