@@ -71,18 +71,12 @@ int parallel_convulation(double* a, int N) {
 
         start_time = MPI_Wtime();
 
-        new_input_size = N+2*(M/2);
-        processed_input_size = new_input_size - M + 1;
+        new_input_size = N
+        processed_input_size = new_input_size - (M-1);
 
         kernel_size = M;
-        if (size == 1) {
-            ele_per_procs = 0;
-            ele_remaining = processed_input_size*processed_input_size;
-        } 
-        else {
-            ele_per_procs = (processed_input_size*processed_input_size) / (size - 1);
-            ele_remaining = (processed_input_size*processed_input_size) % (size -1);
-        }
+        ele_per_procs = (N*N) / (size - 1);
+        ele_remaining = (N*N) % (size -1);
     }
 
     MPI_Bcast(&kernel_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -92,39 +86,36 @@ int parallel_convulation(double* a, int N) {
 
     if (rank == 0) {    
         
-        double processed_a[new_input_size][new_input_size];
-        input_data = &processed_a[0][0];
+        //double processed_a[new_input_size][new_input_size];
+        input_data = a;
 
-        for (i=0; i<new_input_size; i++) {
-            for(j=0; j<new_input_size; j++) {
-                if(i < M/2 || i > N || j < M/2 || j > N) {
-                    processed_a[i][j] = 256;       
-                } 
-                else {
-                    processed_a[i][j] = *(a + j + i*N);
-                }
-            }
-        }
+        // for (i=0; i<new_input_size; i++) {
+        //     for(j=0; j<new_input_size; j++) {
+        //         if(i < M/2 || i > N || j < M/2 || j > N) {
+        //             processed_a[i][j] = 256;       
+        //         } 
+        //         else {
+        //             processed_a[i][j] = *(a + j + i*N);
+        //         }
+        //     }
+        // }
         
-        double *preprocess = (double *)malloc(sizeof(double)*kernel_size*kernel_size);
+        //double *preprocess = (double *)malloc(sizeof(double)*kernel_size*kernel_size);
         req = (MPI_Request *)malloc(sizeof(MPI_Request)*ele_per_procs*(size -1));
-        
+        double     
         r = 0;
         req_no = 0;
-        input_offset_start = 0;
-        if (size > 1) {
-            for(i = 0; i<processed_input_size; i++) {
-                for(j = 0; j<processed_input_size; j++) {
-                    r =  r + (req_no % ele_per_procs == 0);
-                    if (r == size) break;
-                    async_preprocess_send(preprocess, &processed_a[i][j], new_input_size, kernel_size, r, 0, req+req_no);                         
-                    req_no++;
-                    input_offset_start++;
-                }
-                if (r == size) break;
-            }
+        int is_limit = 0;
+        for(i = 0; i<N; i+=ele_per_procs) {
+                r =  r + (req_no % ele_per_procs == 0);
+                //async_preprocess_send(preprocess, &processed_a[i][j], new_input_size, kernel_size, r, 0, req+req_no);                         
+                MPI_Isend(i, MPI_INT, 0, 0, MPI_COMM_WORLD, req+req_no);
+                MPI_Isend(input_data + i, ele_per_procs, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, req+req_no);
+                req_no++;
+                input_offset_start++;
         }
-        input_offset_end = input_offset_start + ele_remaining;    
+
+        input_offset_end = N-1;    
         //free(preprocess);
         output_data = (double *)malloc(sizeof(double)*N*N);
     }
@@ -150,7 +141,7 @@ int parallel_convulation(double* a, int N) {
 
     for(i=input_offset_start; i<input_offset_end; i++) {
         if (rank == 0) {
-            *(output_data + i) = convulate(input_data + i, new_input_size, &kernel[0][0], kernel_size);
+            *(output_data + i + kernel_size/2 + N*kernel_size/2) = convulate(input_data + i, new_input_size, &kernel[0][0], kernel_size);
         }
         else {
             *(output_data + i) = convulate(input_data + i*kernel_size, 1, &kernel[0][0], kernel_size);           
@@ -177,8 +168,8 @@ int parallel_convulation(double* a, int N) {
         print(output_data, N);
         printf("%f\n",preprocess_time-start_time);
         printf("%f\n",end_time-start_time);
-        MPI_Abort(MPI_COMM_WORLD, MPI_SUCCESS);
-    }
+    } 
+
     MPI_Finalize();
     return 0;
 }
